@@ -2,8 +2,9 @@
 #include "Detector.h"
 #include "MainForm.h"
 
+#pragma comment(lib,"xaudio2.lib")
 #pragma comment(lib, "vfw32.lib")
-#pragma comment( lib, "comctl32.lib" )
+#pragma comment(lib, "comctl32.lib" )
 
 #define FRAME_WIDTH  640
 #define FRAME_HEIGHT 480
@@ -34,9 +35,151 @@ void DoEvents()
 	}
 }
 
+//Little-Endian
+#define fourccRIFF 'FFIR'
+#define fourccDATA 'atad'
+#define fourccFMT ' tmf'
+#define fourccWAVE 'EVAW'
+#define fourccXWMA 'AMWX'
+#define fourccDPDS 'sdpd'
+
+HRESULT FindChunk(HANDLE hFile, DWORD fourcc, DWORD & dwChunkSize, DWORD & dwChunkDataPosition)
+{
+    HRESULT hr = S_OK;
+    if (INVALID_SET_FILE_POINTER == SetFilePointer(hFile, 0, NULL, FILE_BEGIN))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    DWORD dwChunkType;
+    DWORD dwChunkDataSize;
+    DWORD dwRIFFDataSize = 0;
+    DWORD dwFileType;
+    DWORD bytesRead = 0;
+    DWORD dwOffset = 0;
+
+    while (hr == S_OK)
+    {
+        DWORD dwRead;
+        if (0 == ReadFile(hFile, &dwChunkType, sizeof(DWORD), &dwRead, NULL))
+            hr = HRESULT_FROM_WIN32(GetLastError());
+
+        if (0 == ReadFile(hFile, &dwChunkDataSize, sizeof(DWORD), &dwRead, NULL))
+            hr = HRESULT_FROM_WIN32(GetLastError());
+
+        switch (dwChunkType)
+        {
+        case fourccRIFF:
+            dwRIFFDataSize = dwChunkDataSize;
+            dwChunkDataSize = 4;
+            if (0 == ReadFile(hFile, &dwFileType, sizeof(DWORD), &dwRead, NULL))
+                hr = HRESULT_FROM_WIN32(GetLastError());
+            break;
+
+        default:
+            if (INVALID_SET_FILE_POINTER == SetFilePointer(hFile, dwChunkDataSize, NULL, FILE_CURRENT))
+                return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        dwOffset += sizeof(DWORD) * 2;
+
+        if (dwChunkType == fourcc)
+        {
+            dwChunkSize = dwChunkDataSize;
+            dwChunkDataPosition = dwOffset;
+            return S_OK;
+        }
+
+        dwOffset += dwChunkDataSize;
+
+        if (bytesRead >= dwRIFFDataSize) return S_FALSE;
+
+    }
+
+    return S_OK;
+
+}
+
+HRESULT ReadChunkData(HANDLE hFile, void * buffer, DWORD buffersize, DWORD bufferoffset)
+{
+    HRESULT hr = S_OK;
+    if (INVALID_SET_FILE_POINTER == SetFilePointer(hFile, bufferoffset, NULL, FILE_BEGIN))
+        return HRESULT_FROM_WIN32(GetLastError());
+    DWORD dwRead;
+    if (0 == ReadFile(hFile, buffer, buffersize, &dwRead, NULL))
+        hr = HRESULT_FROM_WIN32(GetLastError());
+    return hr;
+}
+
+
 CMainDialog::CMainDialog(CWnd* pParent /*=nullptr*/)
 	: CDialogEx(IDD_DIALOG, pParent)
 {
+    //Creating a instance od XAufio2 Engine
+    hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    if (hr == S_OK && FAILED(hr = XAudio2Create(&pXAudio2, 0, XAUDIO2_DEFAULT_PROCESSOR))) {
+        OutputDebugString( "XAudio2Create Failed!\n");
+    }
+
+    if (hr == S_OK && FAILED(hr = pXAudio2->CreateMasteringVoice(&pMasteringVoice)))
+        OutputDebugString(  "XAudio2Create Failed!\n");
+
+
+    //Open the audio file with CreateFile
+
+    HANDLE hFile = CreateFile(
+        "beep.wav",
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        0,
+        NULL
+    );
+
+    DWORD dwChunkPosition = 0;
+    DWORD dwChunkSize;
+
+
+    if (INVALID_HANDLE_VALUE == hFile)
+        OutputDebugString(  "INVALID HANDLE VALUE!\n");
+    //return HRESULT_FROM_WIN32(GetLastError());
+    if (INVALID_SET_FILE_POINTER == SetFilePointer(hFile, 0, NULL, FILE_BEGIN))
+    {
+        OutputDebugString(  "INVALID SET FILE POINTER!\n");
+        //return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    OutputDebugString(  "Locating a 'RIFF' and whole data size\n");
+    FindChunk(hFile, fourccRIFF, dwChunkSize, dwChunkPosition);
+
+    OutputDebugString(  "Checking a filetype\n");
+    DWORD filetype;
+    ReadChunkData(hFile, &filetype, sizeof(DWORD), dwChunkPosition);
+
+    if (filetype != fourccWAVE)
+        OutputDebugString(  "This isn't WAVE file!\n");
+    else OutputDebugString(  "WAVE format!\n");
+
+    OutputDebugString(  "Locating a fmt and filling out WAVEFORMATEXTENSIBLE structure\n");
+    FindChunk(hFile, fourccFMT, dwChunkSize, dwChunkPosition);
+    ReadChunkData(hFile, &wfx, dwChunkSize, dwChunkPosition);
+
+    OutputDebugString(  "Locating a DATA\n");
+    FindChunk(hFile, fourccDATA, dwChunkSize, dwChunkPosition);
+
+    OutputDebugString(  "Reading a sound\n");
+    BYTE * pDataBuffer = new BYTE[dwChunkSize];
+    ReadChunkData(hFile, pDataBuffer, dwChunkSize, dwChunkPosition);
+    buffer.AudioBytes = dwChunkSize;
+    buffer.pAudioData = pDataBuffer;
+    buffer.Flags = XAUDIO2_END_OF_STREAM;
+
+    //Plaing preloaded sound;
+    if (hr == S_OK)
+        hr = pXAudio2->CreateSourceVoice(&pSourceVoice, (WAVEFORMATEX*)&wfx);
+
+
+
     if (!face_cascade.load("haarcascade_frontalface_alt.xml")) {
         MessageBoxA("File \"haarcascade_frontalface_alt.xml\" cannot be found!", "Error", MB_OK | MB_ICONERROR);
         exit(-1);
@@ -85,10 +228,6 @@ cv::Point Center(cv::Rect value)
     return((value.br() + value.tl()) * 0.5);
 }
 
-void beep()
-{
-    Beep(2000, 50);
-}
 
 
 void CMainDialog::RenderThread() 
@@ -256,10 +395,11 @@ void CMainDialog::RenderThread()
                                             line(OriginalFrame, p1, p2, Scalar(255, 255, 255), 3, LINE_8);
                                             rectangle(OriginalFrame, _bbox_old_history[boxHIndex], CV_RGB(0, 0, 255), 2, 8, 0);
                                             rectangle(OriginalFrame, _bbox_[boxIndex], CV_RGB(0, 255, 0), 1, 8, 0);
-
                                             if (!freez_on_alert) {
-                                                thread beep_thread = std::thread(&beep);
-                                                beep_thread.detach();
+                                                if (hr == S_OK)
+                                                    hr = pSourceVoice->SubmitSourceBuffer(&buffer);
+                                                if (hr == S_OK)
+                                                    hr = pSourceVoice->Start(0);
                                                 rectangle(OriginalFrame, cv::Rect(0, 0, OriginalFrame.size().width, OriginalFrame.size().height), Scalar(0, 0, 255), FILLED, 8, 0);
                                             }
 
