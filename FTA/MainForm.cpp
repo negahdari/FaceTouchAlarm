@@ -2,7 +2,7 @@
 #include "Detector.h"
 #include "MainForm.h"
 
-#pragma comment(lib,"xaudio2.lib")
+#pragma comment(lib, "xaudio2.lib")
 #pragma comment(lib, "vfw32.lib")
 #pragma comment(lib, "comctl32.lib" )
 
@@ -110,22 +110,36 @@ HRESULT ReadChunkData(HANDLE hFile, void * buffer, DWORD buffersize, DWORD buffe
 }
 
 
+void CMainDialog::beep()
+{
+    if (!mutex_.try_lock())
+        return;
+    //Plaing preloaded sound;
+    if (hr == S_OK)
+        hr = pSourceVoice->SubmitSourceBuffer(&buffer);
+    if (hr == S_OK)
+        hr = pSourceVoice->Start(0);
+    WaitForSingleObjectEx(voiceCallback.hBufferEndEvent, INFINITE, TRUE);
+    if (hr == S_OK)
+        hr = pSourceVoice->Stop(0);
+    if (hr == S_OK)
+        hr = pSourceVoice->FlushSourceBuffers();
+    mutex_.unlock();
+}
+
+
 CMainDialog::CMainDialog(CWnd* pParent /*=nullptr*/)
 	: CDialogEx(IDD_DIALOG, pParent)
 {
     //Creating a instance od XAufio2 Engine
     hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
-    if (hr == S_OK && FAILED(hr = XAudio2Create(&pXAudio2, 0, XAUDIO2_DEFAULT_PROCESSOR))) {
-        OutputDebugString( "XAudio2Create Failed!\n");
-    }
-
-    if (hr == S_OK && FAILED(hr = pXAudio2->CreateMasteringVoice(&pMasteringVoice)))
-        OutputDebugString(  "XAudio2Create Failed!\n");
+    if (hr == S_OK)
+        hr = XAudio2Create(&pXAudio2, 0, XAUDIO2_DEFAULT_PROCESSOR);
+    if (hr == S_OK)
+        hr = pXAudio2->CreateMasteringVoice(&pMasteringVoice);
 
 
     //Open the audio file with CreateFile
-
     HANDLE hFile = CreateFile(
         "beep.wav",
         GENERIC_READ,
@@ -174,11 +188,11 @@ CMainDialog::CMainDialog(CWnd* pParent /*=nullptr*/)
     buffer.pAudioData = pDataBuffer;
     buffer.Flags = XAUDIO2_END_OF_STREAM;
 
-    //Plaing preloaded sound;
+
     if (hr == S_OK)
-        hr = pXAudio2->CreateSourceVoice(&pSourceVoice, (WAVEFORMATEX*)&wfx);
-
-
+        hr = pXAudio2->CreateSourceVoice(&pSourceVoice, (WAVEFORMATEX*)&wfx, 0, XAUDIO2_DEFAULT_FREQ_RATIO, &voiceCallback, NULL, NULL);
+    if (hr == S_OK)
+        hr = pSourceVoice->SubmitSourceBuffer(&buffer);
 
     if (!face_cascade.load("haarcascade_frontalface_alt.xml")) {
         MessageBoxA("File \"haarcascade_frontalface_alt.xml\" cannot be found!", "Error", MB_OK | MB_ICONERROR);
@@ -396,10 +410,8 @@ void CMainDialog::RenderThread()
                                             rectangle(OriginalFrame, _bbox_old_history[boxHIndex], CV_RGB(0, 0, 255), 2, 8, 0);
                                             rectangle(OriginalFrame, _bbox_[boxIndex], CV_RGB(0, 255, 0), 1, 8, 0);
                                             if (!freez_on_alert) {
-                                                if (hr == S_OK)
-                                                    hr = pSourceVoice->SubmitSourceBuffer(&buffer);
-                                                if (hr == S_OK)
-                                                    hr = pSourceVoice->Start(0);
+                                                thread beeping = std::thread(&CMainDialog::beep, this);
+                                                beeping.detach();
                                                 rectangle(OriginalFrame, cv::Rect(0, 0, OriginalFrame.size().width, OriginalFrame.size().height), Scalar(0, 0, 255), FILLED, 8, 0);
                                             }
 
